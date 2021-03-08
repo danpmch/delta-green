@@ -146,15 +146,14 @@
                       :status (inital-status character-def)}))
 
 (defn modify-path
-  [f path leaf]
-  (let [current-container (reduce get @character path)
-        current-value (leaf current-container)
+  [f & full-path]
+  (let [current-value (reduce get @character full-path)
         new-value (f current-value)]
-    (swap! character assoc-in (conj path leaf) new-value)))
+    (swap! character assoc-in full-path new-value)))
 
 (defn damage
   [stat amount]
-  (modify-path #(- % amount) [:status] stat))
+  (modify-path #(- % amount) :status stat))
 
 (defn roll-percent
   []
@@ -172,5 +171,5 @@
       (do (printf "Success %d vs %d\n" roll skill-value)
           @character)
       (do (printf "Failed %d vs %d\n" roll skill-value)
-          (modify-path #(conj % skill) [:status] :failed-skills)))))
+          (modify-path #(conj % skill) :status :failed-skills)))))
 
