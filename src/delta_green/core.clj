@@ -145,6 +145,12 @@
 (def character (atom {:def character-def
                       :status (inital-status character-def)}))
 
+(def history (atom []))
+(defn emit-event
+  [event]
+  (swap! history #(conj % event)))
+(defn clear-history [] (swap! history (fn [_] [])))
+
 (defn modify-path
   [f & full-path]
   (let [current-value (reduce get @character full-path)
@@ -153,7 +159,12 @@
 
 (defn damage
   [stat amount]
-  (modify-path #(- % amount) :status stat))
+  (do (modify-path #(- % amount) :status stat)
+      (emit-event ``(damage ~~stat ~~amount))))
+
+(defn heal
+  [stat amount]
+  (damage stat (- amount)))
 
 (defn roll-percent
   []
@@ -163,13 +174,31 @@
   []
   (inc (rand-int 6)))
 
+(defn check
+  [modifier & path]
+  (let [target-value (modifier (get-in @character path))
+        roll (roll-percent)]
+    (if (< roll target-value)
+      (do (printf "Success %d vs %d\n" roll target-value)
+          true)
+      (do (printf "Failed %d vs %d\n" roll target-value)
+          false))))
+
 (defn skill-check
   [skill]
-  (let [skill-value (->> @character :def :skills skill)
-        roll (roll-percent)]
-    (if (< roll skill-value)
-      (do (printf "Success %d vs %d\n" roll skill-value)
-          @character)
-      (do (printf "Failed %d vs %d\n" roll skill-value)
-          (modify-path #(conj % skill) :status :failed-skills)))))
+  (if (check identity :def :skills skill)
+    @character
+    (when-not ((reduce get @character [:status :failed-skills]) skill)
+      (emit-event ``(mark ~~skill))
+      (modify-path #(conj % skill) :status :failed-skills))))
+
+(def stat-check (partial check #(* 5 %) :def :stats))
+(defn san-check [] (check identity :status :san))
+
+(defn end-session
+  []
+  (do (doseq [failed-skill (->> @character :status :failed-skills)]
+        (modify-path inc :def :skills failed-skill))
+      (modify-path (fn [_] #{}) :status :failed-skills)))
+
 
