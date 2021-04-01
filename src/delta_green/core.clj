@@ -41,8 +41,9 @@
                                                 (:con core-stats))
                                              2))))
 
-(defn wp [core-stats] (:pow core-stats))
+(defn wp-max [core-stats] (:pow core-stats))
 (defn san-max [core-stats] (* 5 (:pow core-stats)))
+(defn bond-max [core-stats] (:cha core-stats))
 (defn bp [core-stats] (- (san-max core-stats) (:pow core-stats)))
 
 (defstats skills
@@ -124,10 +125,14 @@
                    :craft {:blacksmithing (+ 0 20)}
 
                    })
-   :bonds [["Best friend from grad school" 12]
-           ["HEMA instructor/Medieval studies professor" 12]
-           ["Head of department" 12]
-           ["Therapist" 12]]
+   :bonds {:grad-school {:description "Best friend from grad school"
+                         :start 12}
+           :hema {:description "HEMA instructor/Medieval studies professor"
+                  :start 12}
+           :dept-head {:description "Head of department"
+                       :start 12}
+           :therapist {:description "Therapist"
+                       :start 12}}
 
    :motivations ["The need to know the truth"
                  "Proving his field is valid"
@@ -137,19 +142,63 @@
 
 (defn inital-status
   [character]
-  (let [s (:stats character)]
+  (let [s (:stats character)
+        bonds (:bonds character)]
     {:hp (hp-max s)
      :san (san-max s)
-     :failed-skills #{}}))
+     :wp (wp-max s)
+     :bonds (into {} (mapv (fn [[b info]] [b (:start info)]) bonds))
+     :adaptation {:violence 0
+                  :helplessness 0}
+     :failed-skills {}}))
+
+(def history-file "history.log")
+(def history (atom (load-file history-file)))
+
+(defn backup
+  []
+  (spit (str history-file ".backup") @history))
+
+(backup)
+
+(defn save
+  []
+  (spit history-file @history))
+
+(defn undo
+  []
+  (swap! history drop-last))
 
 (def character (atom {:def character-def
                       :status (inital-status character-def)}))
 
-(def history (atom []))
 (defn emit-event
   [event]
   (swap! history #(conj % event)))
 (defn clear-history [] (swap! history (fn [_] [])))
+
+(def history-registry (atom {}))
+(defn register
+  [key f]
+  (swap! history-registry assoc key f))
+
+(defmacro defmod
+  [n args event & apply-exprs]
+  (let [history-key (:type event)
+        apply-n (symbol (str "apply-" (name n)))
+        result (gensym 'result)
+        options 'options]
+  `(list (defn ~apply-n
+           [~@args]
+           ~@apply-exprs)
+         (register ~history-key ~apply-n)
+         (defn ~n
+           ([~@args ~options]
+            (let [~result (~apply-n ~@args)]
+              (emit-event ~event)
+              ~result))
+           ([~@args]
+            (~n ~@args {}))))))
 
 (defn modify-path
   [f & full-path]
@@ -157,22 +206,76 @@
         new-value (f current-value)]
     (swap! character assoc-in full-path new-value)))
 
-(defn damage
+(defmod damage
   [stat amount]
-  (do (modify-path #(- % amount) :status stat)
-      (emit-event ``(damage ~~stat ~~amount))))
+  {:type :damage
+   :stat stat
+   :amount amount
+   :comment (:comment options)}
+  (modify-path #(- % amount) :status stat))
 
 (defn heal
-  [stat amount]
-  (damage stat (- amount)))
+  ([stat amount options]
+   (damage stat (- amount) options))
+  ([stat amount]
+   (heal stat amount {})))
+
+(defn restore
+  ([stat stat-max options]
+  (let [status (->> @character :status)
+        stats (->> @character :def :stats)
+        delta (- (stat-max stats) (stat status))]
+    (if (> delta 0)
+      (heal stat delta options)
+      nil)))
+  ([options]
+   (do (restore :hp hp-max options)
+       (restore :wp wp-max options))))
+
+(defmod damage-bond
+  [bond amount]
+  {:type :damage-bond
+   :bond bond
+   :amount amount
+   :comment (:comment options)}
+  (modify-path #(- % amount) :status :bonds bond))
+
+(defn get-status
+  []
+  (let [stats (->> @character :def :stats)
+        status (:status @character)]
+    (println "hp" (:hp status) "/" (hp-max stats))
+    (println "wp" (:wp status) "/" (wp-max stats))
+    (println "san" (:san status) "/" (san-max stats))
+    (println "bp" (bp stats))))
+
+(defn get-bonds
+  []
+  (let [bond-max (->> @character :def :stats bond-max)
+        bonds (get-in @character [:status :bonds])
+        max-length (apply max (map (fn [[b _]] (count (str b))) bonds))]
+    (doseq [[bond v] bonds]
+      (printf (str "%-" max-length "s %d / %d\n") bond v bond-max))))
+
+(defn get-skills
+  [& skills]
+  (-> @character :def :skills (select-keys skills)))
 
 (defn roll-percent
   []
   (rand-int 100))
 
+(defn roll-dn
+  [n]
+  (inc (rand-int n)))
+
 (defn roll-6
   []
-  (inc (rand-int 6)))
+  (roll-dn 6))
+
+(defn roll-10
+  []
+  (roll-dn 10))
 
 (defn check
   [modifier & path]
@@ -184,21 +287,87 @@
       (do (printf "Failed %d vs %d\n" roll target-value)
           false))))
 
-(defn skill-check
+(defn inc-map-key
+  [key & path]
+  (apply modify-path
+         #(assoc % key (if-let [current (get-in @character (conj (vec path) key))]
+                         (inc current)
+                         1))
+         path))
+
+(defmod fail-skill-check
   [skill]
-  (if (check identity :def :skills skill)
-    @character
-    (when-not ((reduce get @character [:status :failed-skills]) skill)
-      (emit-event ``(mark ~~skill))
-      (modify-path #(conj % skill) :status :failed-skills))))
+  {:type :fail-skill
+   :skill skill
+   :comment (:comment options)}
+  (inc-map-key skill :status :failed-skills))
+
+(defn skill-check
+  ([skill options]
+   (let [advantage (if-let [a (:adv options)] a 0)
+         disadvantage (if-let [d (:dis options)] d 0)
+         modifier #(+ % (- advantage disadvantage))]
+     (if (check modifier :def :skills skill)
+       (->> @character :status :failed-skills)
+       (do
+         (fail-skill-check skill options)
+         (->> @character :status :failed-skills)))))
+   ([skill] (skill-check skill {})))
 
 (def stat-check (partial check #(* 5 %) :def :stats))
 (defn san-check [] (check identity :status :san))
 
+(defmod skill-change
+  [skill amount]
+  {:type :skill-change
+   :skill skill
+   :amount amount
+   :comment (:comment options)}
+  (modify-path #(+ % amount) :def :skills skill))
+
+(defmod learn
+  []
+  {:type :learn}
+  (do (doseq [[failed-skill _] (->> @character :status :failed-skills)]
+        (modify-path inc :def :skills failed-skill))
+      (modify-path (fn [_] {}) :status :failed-skills)))
+
+(defmod adapt
+  [kind]
+  {:type :adapt
+   :kind kind}
+  (inc-map-key kind :status :adaptation))
+
+(def adapt-to-violence (partial adapt :violence))
+(def adapt-to-helplessness (partial adapt :helplessness))
+
+(defn get-adaptation
+  []
+  (get-in @character [:status :adaptation]))
+
 (defn end-session
   []
-  (do (doseq [failed-skill (->> @character :status :failed-skills)]
-        (modify-path inc :def :skills failed-skill))
-      (modify-path (fn [_] #{}) :status :failed-skills)))
+  (emit-event {:type :end-session}))
 
+(defn apply-history
+  [history]
+  (if-let [event (first history)]
+    (condp #(= %1 (:type %2)) event
+      :damage (do (apply-damage (:stat event) (:amount event))
+                  (apply-history (rest history)))
+      :damage-bond (do (apply-damage-bond (:bond event) (:amount event))
+                       (apply-history (rest history)))
+      :fail-skill (do (apply-fail-skill-check (:skill event))
+                      (apply-history (rest history)))
+      :skill-change (do (apply-skill-change (:skill event) (:amount event))
+                        (apply-history (rest history)))
+      :learn (do (apply-learn)
+                 (apply-history (rest history)))
+      :adapt (do (apply-adapt (:kind event))
+                 (apply-history (rest history)))
+      :end-session (apply-history (rest history))
+      (printf "Unknown event type %s\n" event))
+    nil))
+
+(apply-history @history)
 
