@@ -182,19 +182,34 @@
   [key f]
   (swap! history-registry assoc key f))
 
+(defn to-event
+  [n args]
+  (let [full-args (conj args 'comment)]
+    (apply merge (concat (map (fn [arg] {(keyword (name arg)) arg}) full-args)
+                         {:type (keyword (name n))}))))
+
+(defmacro with-let
+  [event args exprs]
+  (if-let [arg (first args)]
+    `(let [~arg (~(keyword (name arg)) ~event)]
+       (with-let ~event ~(rest args) ~exprs))
+    `(do ~@exprs)))
+
 (defmacro defmod
-  [n args event & apply-exprs]
-  (let [history-key (:type event)
+  [n args & apply-exprs]
+  (let [event (to-event n args)
+        event-sym (gensym 'event)
+        history-key (:type event)
         apply-n (symbol (str "apply-" (name n)))
         result (gensym 'result)
-        options 'options]
+        comment 'comment]
   `(list (defn ~apply-n
-           [~@args]
-           ~@apply-exprs)
+           [~event-sym]
+           (with-let ~event-sym ~args ~apply-exprs))
          (register ~history-key ~apply-n)
          (defn ~n
-           ([~@args ~options]
-            (let [~result (~apply-n ~@args)]
+           ([~@args ~comment]
+            (let [~result (~apply-n ~event)]
               (emit-event ~event)
               ~result))
            ([~@args]
@@ -208,36 +223,28 @@
 
 (defmod damage
   [stat amount]
-  {:type :damage
-   :stat stat
-   :amount amount
-   :comment (:comment options)}
   (modify-path #(- % amount) :status stat))
 
 (defn heal
-  ([stat amount options]
-   (damage stat (- amount) options))
+  ([stat amount comment]
+   (damage stat (- amount) comment))
   ([stat amount]
    (heal stat amount {})))
 
 (defn restore
-  ([stat stat-max options]
+  ([stat stat-max comment]
   (let [status (->> @character :status)
         stats (->> @character :def :stats)
         delta (- (stat-max stats) (stat status))]
     (if (> delta 0)
-      (heal stat delta options)
+      (heal stat delta comment)
       nil)))
-  ([options]
-   (do (restore :hp hp-max options)
-       (restore :wp wp-max options))))
+  ([comment]
+   (do (restore :hp hp-max comment)
+       (restore :wp wp-max comment))))
 
 (defmod damage-bond
   [bond amount]
-  {:type :damage-bond
-   :bond bond
-   :amount amount
-   :comment (:comment options)}
   (modify-path #(- % amount) :status :bonds bond))
 
 (defn get-status
@@ -297,9 +304,6 @@
 
 (defmod fail-skill-check
   [skill]
-  {:type :fail-skill
-   :skill skill
-   :comment (:comment options)}
   (inc-map-key skill :status :failed-skills))
 
 (defn skill-check
@@ -310,7 +314,7 @@
      (if (check modifier :def :skills skill)
        (->> @character :status :failed-skills)
        (do
-         (fail-skill-check skill options)
+         (fail-skill-check skill (:comment options))
          (->> @character :status :failed-skills)))))
    ([skill] (skill-check skill {})))
 
@@ -319,23 +323,16 @@
 
 (defmod skill-change
   [skill amount]
-  {:type :skill-change
-   :skill skill
-   :amount amount
-   :comment (:comment options)}
   (modify-path #(+ % amount) :def :skills skill))
 
 (defmod learn
   []
-  {:type :learn}
   (do (doseq [[failed-skill _] (->> @character :status :failed-skills)]
         (modify-path inc :def :skills failed-skill))
       (modify-path (fn [_] {}) :status :failed-skills)))
 
 (defmod adapt
   [kind]
-  {:type :adapt
-   :kind kind}
   (inc-map-key kind :status :adaptation))
 
 (def adapt-to-violence (partial adapt :violence))
@@ -345,29 +342,18 @@
   []
   (get-in @character [:status :adaptation]))
 
-(defn end-session
+(defmod end-session
   []
-  (emit-event {:type :end-session}))
+  nil)
 
 (defn apply-history
   [history]
-  (if-let [event (first history)]
-    (condp #(= %1 (:type %2)) event
-      :damage (do (apply-damage (:stat event) (:amount event))
-                  (apply-history (rest history)))
-      :damage-bond (do (apply-damage-bond (:bond event) (:amount event))
-                       (apply-history (rest history)))
-      :fail-skill (do (apply-fail-skill-check (:skill event))
-                      (apply-history (rest history)))
-      :skill-change (do (apply-skill-change (:skill event) (:amount event))
-                        (apply-history (rest history)))
-      :learn (do (apply-learn)
-                 (apply-history (rest history)))
-      :adapt (do (apply-adapt (:kind event))
-                 (apply-history (rest history)))
-      :end-session (apply-history (rest history))
-      (printf "Unknown event type %s\n" event))
-    nil))
+  (let [event (first history)
+        apply-event (get @history-registry (:type event))]
+    (cond (not event) nil
+          (not apply-event) (print "Unknown event type" event)
+          :else (do (apply-event event)
+                    (apply-history (rest history))))))
 
 (apply-history @history)
 
