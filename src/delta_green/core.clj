@@ -288,7 +288,7 @@
   [modifier & path]
   (let [target-value (modifier (get-in @character path))
         roll (roll-percent)]
-    (if (< roll target-value)
+    (if (<= roll target-value)
       (do (printf "Success %d vs %d\n" roll target-value)
           true)
       (do (printf "Failed %d vs %d\n" roll target-value)
