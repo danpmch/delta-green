@@ -1,36 +1,15 @@
 # delta-green
 
-FIXME: description
-
-## Installation
-
-Download from http://example.com/FIXME.
+A REPL based tool for managing a character for the Delta Green RPG
 
 ## Usage
 
-FIXME: explanation
-
-    $ java -jar delta-green-0.1.0-standalone.jar [args]
-
-## Options
-
-FIXME: listing of options this app accepts.
-
-## Examples
-
-...
-
-### Bugs
-
-...
-
-### Any Other Sections
-### That You Think
-### Might be Useful
+Intended to be launched with `lein repl` and then interacted with through the repl
+as with a shell.
 
 ## License
 
-Copyright © 2021 FIXME
+Copyright © 2022
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
